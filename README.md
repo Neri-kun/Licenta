@@ -2,12 +2,4 @@
 
 This repository contains not only the source code, but also the documentation and the power-point presentation of the project used for highlighting my academic work for the degree project.
 
-The source code consists of the following major sections:
-
-- Data Loading
-
-- Data visualisation
-
-- Data normalisation
-
-- Data preprocessing
+The source code is *song_recommender_system.iypnb* and documentation is *Neremzoiu_Ionut_Dragos_2022_Calculatoare-Engleza*
