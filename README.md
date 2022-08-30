@@ -2,4 +2,4 @@
 
 
 
-The source code is **song_recommender_system.iypnb** and the system documentation is **Neremzoiu_Ionut_Dragos_Calculatoare_Engleza_2022.pdf**.
+The source code is **song_recommender_system.iypnb**, the system documentation for complete, in-depth details about the system is **Neremzoiu_Ionut_Dragos_Calculatoare_Engleza_2022.pdf** and the system ppt presentation for a more short presentation about the system is **Music Recommender System_v4.pptx**
