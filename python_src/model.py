@@ -8,7 +8,7 @@ from time import perf_counter
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import pairwise_kernels
-from numba import jit
+from numba import jit,cuda
 import os
 
 class Song:
@@ -25,57 +25,64 @@ class SongReccomender:
 
     """ This is the class of the recommender system
 
-        Attributes
+        Parameters:
+            track_dataframe: A pandas dataframe which contains the tracks used for the development of the recommender system
+            number_of_principal_components: The number of principal components for converting non-categorical audio features into a number of principal components
+            number_of_clusters: The number of clusters for K-Means clustering
+
+        Attributes:
+            filename: The file path of the track dataset used for generating recommendations
+
+
     """
 
     def __init__(self, filename, number_of_principal_components=6, number_of_clusters=6):
         self.track_dataframe = pd.read_excel(filename)
         self.number_of_principal_components = number_of_principal_components
         self.number_of_clusters=number_of_clusters
-        self.remove_categorical_data()
-        self.pca(self.number_of_principal_components)
-        self.train_and_add_categorical_columns()
+        self.__remove_categorical_data()
+        self.__pca(self.number_of_principal_components)
+        self.__cluster_dataframe_in_numbered_labels_with_k_means()
+        self.__readd_categorical_columns()
+        self.__classify_track_labels_by_knn()
+        self.__compute_tf_idf_matrices_by_label_for_all_tracks()
 
 
-    def remove_categorical_data(self):
-        self.cols = ['artist', 'danceability', 'energy', 'key', 'loudness', 'mode', 'speechiness', 'acousticness',
-                     'instrumentalness', 'liveness', 'valence', 'tempo', 'duration_ms', 'time_signature', 'label']
-        self.non_categorical = ['danceability', 'energy', 'loudness', 'speechiness', 'acousticness', 'instrumentalness',
+    def __remove_categorical_data(self):
+        self.non_categorical_audio_features = ['danceability', 'energy', 'loudness', 'speechiness', 'acousticness', 'instrumentalness',
                                 'liveness', 'valence', 'tempo', 'duration_ms']
-        self.categorical = ['artist', 'key', 'mode', 'time_signature', 'label']
 
-        self.track_dataframe[self.non_categorical] = self.track_dataframe[self.non_categorical].apply(
+        self.track_dataframe[self.non_categorical_audio_features] = self.track_dataframe[self.non_categorical_audio_features].apply(
             lambda x: (x - x.min()) / (x.max() - x.min()))
 
-    def pca(self, number_of_components=6):
+    def __pca(self, number_of_components=6):
         pca = PCA(number_of_components)
-        self.new_track_dataframe = self.track_dataframe#.drop_duplicates()
-        self.new_track_dataframe = pca.fit_transform(self.new_track_dataframe[self.non_categorical])
+        self.new_track_dataframe = pca.fit_transform(self.track_dataframe[self.non_categorical_audio_features])
         self.new_track_dataframe = pd.DataFrame(self.new_track_dataframe)
         #return
 
-    def train(self, df_train):
+    def __cluster_dataframe_in_numbered_labels_with_k_means(self):
         self.km = KMeans(n_clusters=self.number_of_clusters, init='k-means++',n_init=10, max_iter=1000,tol=1e-04, random_state=0)
-        y_km = self.km.fit(df_train)
-        return y_km
+        self.km.fit(self.new_track_dataframe)
+        self.track_dataframe['label'] = self.km.labels_
 
-    def compute_current_pca_based_distance(self, center_coordinates, data_coordiantes):
+    def __compute_current_pca_based_distance(self, center_coordinates, data_coordiantes):
         sum = 0
         for i in range(len(data_coordiantes)):
             sum += (center_coordinates[i] - data_coordiantes[i]) ** 2
         return (sum) ** 0.5
 
     @jit(target_backend='cuda')
-    def compute_all_pca_based_distances(self, dummy_df, song):
+    def __compute_all_pca_based_distances(self, dummy_df, song):
         list_of_distances = []
         for i in range(len(dummy_df)):
-            current_distance = self.compute_current_pca_based_distance(dummy_df[i], song.values[0][0:self.number_of_principal_components])
+            current_distance = self.__compute_current_pca_based_distance(dummy_df[i], song.values[0][0:self.number_of_principal_components])
             list_of_distances.append(current_distance)
         return list_of_distances
 
 
     @jit(target_backend='cuda')
-    def computing_custom_distances(self, array_dist, dummy_df, cosine_similarities):
+    def __computing_custom_distances(self, array_dist, dummy_df, cosine_similarities):
         array_dist_min = min(array_dist)
         array_dist_max = max(array_dist)
         min_popularity = min(dummy_df['popularity'])
@@ -92,34 +99,30 @@ class SongReccomender:
             songs.append(current_song)
         return songs
 
-    def train_and_add_categorical_columns(self):
-        self.train(self.new_track_dataframe)
-        self.new_track_dataframe['label'] = self.km.labels_
-        self.new_track_dataframe['artist'] = self.track_dataframe.artist
-        self.new_track_dataframe['name'] = self.track_dataframe.name
-        self.new_track_dataframe['preview'] = self.track_dataframe.preview
-        self.new_track_dataframe['popularity'] = self.track_dataframe.popularity
-        self.new_track_dataframe['type'] = self.track_dataframe.label
-        self.new_track_dataframe['lyrics'] = self.track_dataframe.lyrics
-        self.new_track_dataframe['id'] = self.track_dataframe.id
+    def __readd_categorical_columns(self):
+        self.remaining_track_features = ['label', 'artist', 'name', 'preview', 'popularity', 'type', 'lyrics', 'id']
 
-        #de refactorizat partea asta
+        for current_feature in self.remaining_track_features:
+            self.new_track_dataframe[current_feature] = self.track_dataframe[current_feature]
+
+    def __classify_track_labels_by_knn(self):
+
         self.X = self.new_track_dataframe
         self.Y = self.new_track_dataframe['label']
-        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(self.X, self.Y, test_size=0.20, shuffle=False)
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(self.X, self.Y, test_size=0.20,
+                                                                                shuffle=False)
         knn = KNeighborsClassifier(n_neighbors=25)
-        knn.fit(self.X_train.drop(['label', 'artist', 'name', 'preview', 'type', 'popularity', 'lyrics', 'id'], axis=1),
-                self.y_train)
-        self.y_pred = knn.predict(
-            self.X_test.drop(['label', 'artist', 'name', 'preview', 'type', 'popularity', 'lyrics', 'id'], axis=1))
+        knn.fit(self.X_train.drop(self.remaining_track_features, axis=1), self.y_train)
+        self.y_pred = knn.predict(self.X_test.drop(self.remaining_track_features, axis=1))
         self.y_pred = pd.Series(self.y_pred)
+
+    def __compute_tf_idf_matrices_by_label_for_all_tracks(self):
 
         self.tfidf = TfidfVectorizer(analyzer='word', stop_words='english', lowercase=True)
         self.Y = pd.concat([self.y_train, self.y_pred], ignore_index=True)
         labels = self.Y.unique()
         self.X_labeled = [self.X.loc[self.Y == label] for label in range(0, len(labels))]
         self.lyrics_tf_idf_matrices = [self.tfidf.fit_transform(self.X_labeled[label]['lyrics'].values.astype('U')) for label in range(0, len(labels))]
-
 
 
     def recommend_songs(self, track):
@@ -144,10 +147,10 @@ class SongReccomender:
             cosine_similarities = np.delete(cosine_similarities, position, axis=0)
             print("Current time passed at this point after cosine similarity: " + str(perf_counter() - start_time) + " seconds.")
 
-            array_dist = self.compute_all_pca_based_distances(X_labeled.to_numpy(), track)
+            array_dist = self.__compute_all_pca_based_distances(X_labeled.to_numpy(), track)
 
             print("Current time passed at this point after computing Euclidean distances : " + str(perf_counter() - start_time) + " seconds")
-            arr = self.computing_custom_distances(array_dist, X_labeled.reset_index(), cosine_similarities) #min_popularity, max_popularity)#.to_numpy(), cosine_similarities, min_popularity, max_popularity)
+            arr = self.__computing_custom_distances(array_dist, X_labeled.reset_index(), cosine_similarities) #min_popularity, max_popularity)#.to_numpy(), cosine_similarities, min_popularity, max_popularity)
             print("Current time passed at this point after computing custom distances: " + str(perf_counter() - start_time) + " seconds.")
             arr.sort(key = lambda x: x.custom_distance, reverse=True)
             print("Current time passed at this point after sorting: " + str(perf_counter() - start_time) + " seconds.")
